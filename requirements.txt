@@ -1,4 +1,4 @@
 streamlit
 openai
 python-dotenv
-serpapi
+git+https://github.com/serpapi/google-search-results-python
