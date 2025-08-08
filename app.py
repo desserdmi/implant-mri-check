@@ -1,4 +1,5 @@
 import os
+import re
 import streamlit as st
 from openai import OpenAI
 from serpapi import GoogleSearch
@@ -116,7 +117,12 @@ if st.button("Suche starten", disabled=not hersteller or not modell):
 
         # ---- Zeilen mit "k.A." entfernen ----
         filtered_lines = [ln for ln in result.split("\n") if "k.A." not in ln.strip()]
-        clean_result = "\n".join(filtered_lines).strip()
+
+        # ---- Inhalte in runden Klammern entfernen ----
+        no_parentheses = [re.sub(r"\([^)]*\)", "", ln).strip() for ln in filtered_lines]
+
+        # ---- Überflüssige Leerzeilen entfernen ----
+        clean_result = "\n".join([ln for ln in no_parentheses if ln]).strip()
 
         st.success("✅ Analyse abgeschlossen")
         st.markdown(clean_result)
