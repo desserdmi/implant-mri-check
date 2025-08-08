@@ -20,8 +20,9 @@ MANUFACTURER_SITES = [
 ]
 
 # ---- Websuche ----
-def search_web(implant_text: str, num_results: int = 10, restrict_to_manufacturers: bool = True):
+def search_web(hersteller: str, modell: str, num_results: int = 10, restrict_to_manufacturers: bool = True):
     """Sucht gezielt (oder breit) nach MRI-/MR-Conditional-Infos."""
+    implant_text = f"{hersteller} {modell}"
     if restrict_to_manufacturers:
         sites = " OR ".join([f"site:{d}" for d in MANUFACTURER_SITES])
         query = f"\"{implant_text}\" (MRI compatibility OR MR conditional OR MRT tauglich) {sites}"
@@ -43,14 +44,15 @@ def search_web(implant_text: str, num_results: int = 10, restrict_to_manufacture
     return (pdfs + others)[:num_results]
 
 # ---- GPT-Auswertung ----
-def analyze_with_gpt(implant_text: str, serial: str, links: list[str]) -> str:
+def analyze_with_gpt(hersteller: str, modell: str, links: list[str]) -> str:
+    implant_text = f"{hersteller} {modell}"
     links_block = "\n".join(links) if links else "Keine Links gefunden."
     prompt = f"""
 Du bist ein medizinischer Assistent für bildgebende Diagnostik.
-Analysiere die MR-Kompatibilität des folgenden Implantats (Hersteller + Modell, ggf. Typ/Lead):
+Analysiere die MR-Kompatibilität des folgenden Implantats:
 
-Implantat: {implant_text}
-Seriennummer (falls relevant/auffindbar): {serial or "nicht angegeben"}
+Hersteller: {hersteller}
+Modell: {modell}
 
 Nutze NUR validierte Informationen. Hier sind potenziell relevante Quellen:
 {links_block}
@@ -71,7 +73,7 @@ Liefere eine strukturierte, präzise Antwort in Deutsch (leere Felder mit "k.A."
 Wenn Informationen widersprüchlich oder nicht auffindbar sind, weise explizit darauf hin.
 """
     resp = client.chat.completions.create(
-        model="gpt-4o",  # alternativ: "gpt-4o-mini" für günstiger & schneller
+        model="gpt-4o",  # alternativ: "gpt-4o-mini"
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
@@ -80,25 +82,25 @@ Wenn Informationen widersprüchlich oder nicht auffindbar sind, weise explizit d
 # ---- Streamlit UI ----
 st.set_page_config(page_title="MR-Kompatibilität medizinischer Implantate", layout="centered")
 st.title("🔍 MR-Kompatibilität medizinischer Implantate")
-st.markdown("Gib **Hersteller + Modell** ein (z. B. „Medtronic Attesta DR ATDR01“ oder „Medtronic CapSureFix MRI SureScan“).")
+st.markdown("Gib **Hersteller** und **Modell** ein (z. B. Hersteller: „Medtronic“ / Modell: „Attesta DR ATDR01“).")
 
-implant_text = st.text_input("Implantat (Hersteller + Modell)", placeholder="z. B. Medtronic Attesta DR ATDR01")
-serial = st.text_input("Seriennummer (optional)")
+hersteller = st.text_input("Hersteller", placeholder="z. B. Medtronic")
+modell = st.text_input("Modell", placeholder="z. B. Attesta DR ATDR01")
 
-if st.button("Suche starten", disabled=not implant_text.strip()):
+if st.button("Suche starten", disabled=not hersteller.strip() or not modell.strip()):
     with st.spinner("🔎 Suche auf Hersteller-Webseiten..."):
-        links = search_web(implant_text)
+        links = search_web(hersteller, modell)
 
     # Falls keine Treffer → breitere Suche im gesamten Web
     if not links:
         st.warning("⚠️ Keine direkten Treffer auf Herstellerseiten gefunden – starte erweiterte Suche im gesamten Web...")
         with st.spinner("🌐 Führe erweiterte Suche durch..."):
-            links = search_web(implant_text, restrict_to_manufacturers=False)
+            links = search_web(hersteller, modell, restrict_to_manufacturers=False)
 
     if not links:
         st.error("❌ Leider keine passenden Informationen gefunden. Bitte andere Schreibweise oder Modellbezeichnung versuchen.")
     else:
         with st.spinner("🧠 Analysiere Informationen..."):
-            result = analyze_with_gpt(implant_text, serial, links)
+            result = analyze_with_gpt(hersteller, modell, links)
         st.success("✅ Analyse abgeschlossen")
         st.markdown(result)
