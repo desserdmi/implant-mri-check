@@ -1,5 +1,6 @@
 import os
 import re
+import pandas as pd
 import streamlit as st
 from openai import OpenAI
 from serpapi import GoogleSearch
@@ -22,13 +23,7 @@ MANUFACTURER_SITES = [
 
 # ---------- Websuche ----------
 def search_web(hersteller: str, modell: str, num_results: int = 10, restrict_to_manufacturers: bool = True):
-    """
-    Sucht nach MRI-/MR-Conditional-Informationen.
-    Zuerst optional nur auf Herstellerseiten, sonst im gesamten Web.
-    PDFs werden priorisiert.
-    """
     implant_text = f"{hersteller} {modell}".strip()
-
     if restrict_to_manufacturers:
         sites = " OR ".join([f"site:{d}" for d in MANUFACTURER_SITES])
         query = f"\"{implant_text}\" (MRI compatibility OR MR conditional OR MRT tauglich) {sites}"
@@ -42,12 +37,10 @@ def search_web(hersteller: str, modell: str, num_results: int = 10, restrict_to_
         "num": num_results,
         "hl": "de",
     }
-
     results = GoogleSearch(params).get_dict() or {}
     org = results.get("organic_results", []) or []
     urls = [r.get("link") for r in org if r.get("link")]
 
-    # PDFs nach vorne sortieren
     pdfs = [u for u in urls if u.lower().endswith(".pdf")]
     others = [u for u in urls if not u.lower().endswith(".pdf")]
     return (pdfs + others)[:num_results]
@@ -82,47 +75,91 @@ Antworte im folgenden Format. Wenn eine Angabe nicht auffindbar ist, schreibe k.
 Wenn Informationen widersprüchlich oder nicht auffindbar sind, weise explizit darauf hin.
 """
     resp = client.chat.completions.create(
-        model="gpt-4o",  # oder "gpt-4o-mini" für günstiger/schneller
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
     return resp.choices[0].message.content
 
+# ---------- Ausgabe-Bereinigung ----------
+def clean_output(text: str) -> str:
+    filtered_lines = [ln for ln in text.split("\n") if "k.A." not in ln.strip()]
+    no_parentheses = [re.sub(r"\([^)]*\)", "", ln).strip() for ln in filtered_lines]
+    return "\n".join([ln for ln in no_parentheses if ln]).strip()
+
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="MR-Kompatibilität medizinischer Implantate", layout="centered")
 st.title("🔍 MR-Kompatibilität medizinischer Implantate")
-st.markdown("Gib **Hersteller** und **Modell** ein (z. B. Hersteller: „Medtronic“ / Modell: „Attesta DR ATDR01“).")
 
-col1, col2 = st.columns(2)
-with col1:
-    hersteller = st.text_input("Hersteller", placeholder="z. B. Medtronic").strip()
-with col2:
-    modell = st.text_input("Modell", placeholder="z. B. Attesta DR ATDR01").strip()
+mode = st.radio("Wähle den Modus:", ["Einzelabfrage", "Liste hochladen"])
 
-if st.button("Suche starten", disabled=not hersteller or not modell):
-    with st.spinner("🔎 Suche gestartet"):
-        links = search_web(hersteller, modell)
+if mode == "Einzelabfrage":
+    col1, col2 = st.columns(2)
+    with col1:
+        hersteller = st.text_input("Hersteller", placeholder="z. B. Medtronic").strip()
+    with col2:
+        modell = st.text_input("Modell", placeholder="z. B. Attesta DR ATDR01").strip()
 
-    # Falls keine Treffer → breitere Suche
-    if not links:
-        st.warning("⚠️ Starte erweiterte Suche…")
-        with st.spinner("🌐 Führe erweiterte Suche durch..."):
-            links = search_web(hersteller, modell, restrict_to_manufacturers=False)
+    if st.button("Suche starten", disabled=not hersteller or not modell):
+        with st.spinner("🔎 Suche gestartet"):
+            links = search_web(hersteller, modell)
+        if not links:
+            st.warning("⚠️ Starte erweiterte Suche…")
+            with st.spinner("🌐 Führe erweiterte Suche durch..."):
+                links = search_web(hersteller, modell, restrict_to_manufacturers=False)
+        if not links:
+            st.error("❌ Keine passenden Informationen gefunden.")
+        else:
+            with st.spinner("🧠 Analysiere Informationen..."):
+                result = analyze_with_gpt(hersteller, modell, links)
+            st.success("✅ Analyse abgeschlossen")
+            st.markdown(clean_output(result))
 
-    if not links:
-        st.error("❌ Leider keine passenden Informationen gefunden. Bitte Schreibweise/Modell prüfen oder ein alternatives Modell versuchen.")
-    else:
-        with st.spinner("🧠 Analysiere Informationen..."):
-            result = analyze_with_gpt(hersteller, modell, links)
+elif mode == "Liste hochladen":
+    uploaded_file = st.file_uploader("CSV oder Excel mit Spalten: Hersteller, Modell", type=["csv", "xlsx"])
+    if uploaded_file is not None:
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
 
-        # ---- Zeilen mit "k.A." entfernen ----
-        filtered_lines = [ln for ln in result.split("\n") if "k.A." not in ln.strip()]
+        if not {"Hersteller", "Modell"}.issubset(df.columns):
+            st.error("❌ Die Datei muss die Spalten 'Hersteller' und 'Modell' enthalten.")
+        else:
+            results_list = []
+            for idx, row in df.iterrows():
+                hersteller = str(row["Hersteller"]).strip()
+                modell = str(row["Modell"]).strip()
+                if not hersteller or not modell:
+                    continue
 
-        # ---- Inhalte in runden Klammern entfernen ----
-        no_parentheses = [re.sub(r"\([^)]*\)", "", ln).strip() for ln in filtered_lines]
+                with st.spinner(f"Analysiere {hersteller} {modell}..."):
+                    links = search_web(hersteller, modell)
+                    if not links:
+                        links = search_web(hersteller, modell, restrict_to_manufacturers=False)
+                    if not links:
+                        result_text = "Keine passenden Informationen gefunden."
+                    else:
+                        result_text = clean_output(analyze_with_gpt(hersteller, modell, links))
 
-        # ---- Überflüssige Leerzeilen entfernen ----
-        clean_result = "\n".join([ln for ln in no_parentheses if ln]).strip()
+                results_list.append({
+                    "Hersteller": hersteller,
+                    "Modell": modell,
+                    "Ergebnis": result_text
+                })
 
-        st.success("✅ Analyse abgeschlossen")
-        st.markdown(clean_result)
+            # In DataFrame umwandeln
+            results_df = pd.DataFrame(results_list)
+
+            # Excel-Datei erzeugen
+            output_path = "mr_kompatibilitaet_ergebnisse.xlsx"
+            results_df.to_excel(output_path, index=False)
+
+            # Download-Link
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    label="📥 Ergebnisse als Excel herunterladen",
+                    data=f,
+                    file_name=output_path,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
